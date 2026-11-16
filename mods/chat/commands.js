@@ -1,5 +1,5 @@
 // The / menu: which commands an agent takes, as its own menu lists them.
-import { exec } from "herdr";
+import { exec } from "./winexec.js";
 import { claudeInfo, codexCalls } from "./sdk.js";
 
 // Claude Code's built-in commands, as its app describes them (2.1.311). The

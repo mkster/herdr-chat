@@ -1,6 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, terminals, run, exec, home, notify, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { spaces, panes, terminals, run, home, notify, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { exec } from "./winexec.js";
 
 function find(node, id) {
   if (node?.id === id) return node;

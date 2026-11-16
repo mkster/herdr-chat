@@ -7,7 +7,8 @@
 // chat's tab while it's away. The chat and its pane header each keep a copy
 // of this file (a mod can't import another's): change both together.
 
-import { exec, hc } from "herdr";
+import { hc } from "herdr";
+import { exec } from "./winexec.js";
 
 // An app command through the CLI, awaited: run() from a mod returns nothing
 // and doesn't keep calls in order.

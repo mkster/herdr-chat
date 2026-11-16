@@ -2,18 +2,24 @@
 // `claude -p` in stream-json mode, sent control requests, read for their
 // answers. With a session id it works on a read-only fork of that session,
 // so the agent in the terminal is never touched or interrupted.
-import { exec } from "herdr";
+import { exec } from "./winexec.js";
 
 // Sends each request in argv[3] (a JSON array) and prints the answers, plus
 // the newest command list Claude announced: it adds plugins' and MCP servers'
 // commands a moment after starting, so with settle > 0 it waits that long for them.
 const PY = `
-import json, subprocess, sys, threading, time, select
+import json, queue, shutil, subprocess, sys, threading, time
 folder, sid, reqs, timeout, settle, delay = sys.argv[1], sys.argv[2], json.loads(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6])
-args = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
+args = [shutil.which("claude") or "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
 if sid: args += ["--resume", sid, "--fork-session"]
-p = subprocess.Popen(args, cwd=folder or None, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+p = subprocess.Popen(args, cwd=folder or None, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
 threading.Timer(timeout, p.kill).start()
+# Lines arrive through a thread: select() on a pipe doesn't work on Windows.
+lines = queue.Queue()
+def pump():
+    for line in p.stdout: lines.put(line)
+    lines.put("")
+threading.Thread(target=pump, daemon=True).start()
 time.sleep(delay)
 for i, r in enumerate(reqs):
     p.stdin.write(json.dumps({"type": "control_request", "request_id": "r%d" % i, "request": r}) + "\\n")
@@ -21,10 +27,12 @@ p.stdin.flush()
 out = [None] * len(reqs)
 commands, done = None, None
 while True:
-    if done is not None:
+    if done is None: line = lines.get()
+    else:
         left = done + settle - time.time()
-        if left <= 0 or not select.select([p.stdout], [], [], left)[0]: break
-    line = p.stdout.readline()
+        if left <= 0: break
+        try: line = lines.get(timeout=left)
+        except queue.Empty: break
     if not line: break
     try: d = json.loads(line)
     except ValueError: continue
@@ -77,7 +85,7 @@ out = []
 for f in sorted(glob.glob(d + "/*.jsonl"), key=os.path.getmtime, reverse=True)[:60]:
     title, first = None, None
     try:
-        with open(f, errors="replace") as fh:
+        with open(f, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if '"aiTitle"' in line or '"customTitle"' in line or (first is None and '"type":"user"' in line):
                     try: x = json.loads(line)
@@ -98,9 +106,9 @@ export async function listSessions(folder, on) {
 // Codex: the same through its app-server (JSON-RPC over stdio), as the
 // ChatGPT app does. Each call starts one, asks, and stops it.
 const CODEX_PY = `
-import json, subprocess, sys, threading, os
+import json, shutil, subprocess, sys, threading, os
 cwd, mode, arg = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
-p = subprocess.Popen(["codex", "app-server"], cwd=cwd or None, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+p = subprocess.Popen([shutil.which("codex") or "codex", "app-server"], cwd=cwd or None, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
 def bail(o):
     print(json.dumps(o)); sys.stdout.flush(); p.kill(); os._exit(0)
 threading.Timer(float(arg.get("timeout", 60)), lambda: bail({"error": "Codex didn't answer in time"})).start()

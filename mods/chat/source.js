@@ -1,5 +1,5 @@
 // Finds the session log an agent terminal is writing, and reads it as it grows.
-import { exec } from "herdr";
+import { exec, onWindows } from "./winexec.js";
 import { Buffer } from "buffer";
 
 // Start this far from the end of a long log; earlier history is skipped.
@@ -42,7 +42,9 @@ export async function locate(term, kind) {
   if (!pid) return null;
   const on = machineOf(term.address);
   const r = await sh(kind === "codex" ? CODEX : CLAUDE, [String(pid), term.foreground.cwd ?? ""], on);
-  return r.stdout.trim().split("\n")[0] || null;
+  const file = r.stdout.trim().split("\n")[0] || null;
+  // Git's sh on Windows prints /c/Users/...; Herdr's own file APIs want C:/Users/...
+  return file && !on && onWindows() ? file.replace(/^\/([a-z])\//i, "$1:/") : file;
 }
 
 // Reads complete new lines from `file` since the last call.

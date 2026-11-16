@@ -2,7 +2,8 @@
 // dialog with the file, Save (⌘S) and Close. Props: { file, title, overlay }.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { props, theme, settings, readTextFile, writeTextFile, closeOverlay, exec } from "herdr";
+import { props, theme, settings, readTextFile, writeTextFile, closeOverlay } from "herdr";
+import { exec, onWindows } from "./winexec.js";
 
 const LANG = { md: "markdown", json: "json", toml: "toml", js: "javascript", sh: "bash", yaml: "yaml", yml: "yaml" };
 
@@ -56,7 +57,7 @@ export default class ChatFile extends View {
       .on_action("chat_file_save", (_e, cx) => this.save(cx))
       .child(h_flex().px(14).py(10).gap(10).items_center().border_b(1).border_color(t.border)
         .child(v_flex().flex_1().min_w(0)
-          .child(div().font_semibold().child(p.title ?? this.file?.split("/").pop() ?? "File"))
+          .child(div().font_semibold().child(p.title ?? this.file?.split(onWindows() ? /[\\/]/ : "/").pop() ?? "File"))
           .child(div().text_size(11.5).text_color(t.dim).truncate().child(this.file ?? "")))
         .when(Boolean(this.status), (el) => el.child(div().text_size(12).text_color(/Couldn't/.test(this.status) ? t.blocked : t.muted).child(this.status)))
         .child(btn("close", "Close", () => closeOverlay(p.overlay)))

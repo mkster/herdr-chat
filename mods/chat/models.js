@@ -1,6 +1,7 @@
 // Models and effort levels for Claude Code and Codex: what can be picked,
 // how to start an agent with them, and how to switch a running one.
-import { exec, hc } from "herdr";
+import { hc } from "herdr";
+import { exec } from "./winexec.js";
 
 export const CLAUDE_MODELS = [
   { id: "claude-opus-5-5", name: "Opus 5.5", alias: "opus" },
