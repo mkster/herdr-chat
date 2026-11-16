@@ -6,11 +6,20 @@ const NUMBER = /^\s*\d+[.)]\s+/;
 const HINT = /(Enter to (confirm|select)|Esc to (cancel|exit)|↑\/↓|to navigate)/i;
 const RULE = /^\s*[─━—\-▔▁═]{8,}\s*$/;
 
+// The screen's lines, with what would hide a menu taken away: carriage returns
+// (Windows terminals), and the borders of a panel Claude draws in a box. A box's
+// top and bottom (╭──╮, ╰──╯) become plain rules, and its sides (│ … │) go, so
+// options inside it start with their marker like any other menu's.
+function screenLines(screen) {
+  return (screen ?? "").replace(/\r/g, "").split("\n").map((l) =>
+    /^\s*[╭╰][─━]*.*[╮╯]\s*$/.test(l) ? "─".repeat(20) : l.replace(/^(\s*)│ ?/, "$1").replace(/\s*│\s*$/, ""));
+}
+
 // A menu waiting at the bottom of the screen: its hint line ("Enter to confirm ·
 // Esc to cancel") is among the last lines. "form" when ←/→ change its values,
 // which a pick-one list can't show.
 export function menuAtBottom(screen) {
-  let lines = (screen ?? "").split("\n").filter((l) => l.trim());
+  let lines = screenLines(screen).filter((l) => l.trim());
   // Claude keeps its input box (a rule, ❯, a rule, its footer) under the menu.
   const rules = lines.flatMap((l, i) => (RULE.test(l) ? [i] : []));
   const box = rules.at(-2);
@@ -19,11 +28,11 @@ export function menuAtBottom(screen) {
   return hint ? (/←|→|to change/.test(hint) ? "form" : "menu") : null;
 }
 
-// { question, options: [text], selected } or null when the screen has no menu.
+// { question, options: [text], selected, tabs: [{ label, done }] } or null when the screen has no menu.
 export function parsePrompt(screen) {
   // A ✔ marks the current choice; read it as an indent, so its line lines up.
   const current = new Set();
-  const lines = (screen ?? "").split("\n").map((l, i) => {
+  const lines = screenLines(screen).map((l, i) => {
     const m = /^(\s*(?:[❯›>]\s+)?)[✔✓]\s/.exec(l);
     if (!m) return l;
     current.add(i);
@@ -56,8 +65,17 @@ export function parsePrompt(screen) {
   // The question: what's above the options, back to the last rule line.
   let top = first;
   while (top > 0 && !RULE.test(lines[top - 1])) top--;
-  const question = reflow(lines.slice(top, first));
-  return { question, options, selected };
+  // A titled divider ("Read outside … ╌╌╌╌") keeps its title, not its dashes.
+  // AskUserQuestion's row of questions ("← ☐ Latency  ✔ Submit →"): read as
+  // tabs, not text (☐ is missing from many UI fonts).
+  const above = lines.slice(top, first);
+  const row = above.findIndex((l) => l.trim());
+  const tabs = row >= 0 && /^\s*(←\s*)?[☐☒✔✓]\s/.test(above[row])
+    ? [...above[row].matchAll(/([☐☒✔✓])\s*([^☐☒✔✓←→]+)/g)].map(([, box, label]) => ({ label: label.trim(), done: box !== "☐" && label.trim() !== "Submit" }))
+    : [];
+  if (tabs.length) above.splice(row, 1);
+  const question = reflow(above.map((l) => l.replace(/[─━—\-╌┄▔▁═]{8,}/g, " ")));
+  return { question, options, selected, tabs };
 }
 
 // Terminal-wrapped text as paragraphs.

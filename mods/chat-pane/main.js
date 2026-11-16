@@ -11,8 +11,11 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { panes, props, run, theme, home, terminals, openOverlay, closeOverlay } from "herdr";
+import { panes, props, run, theme, home, terminals, openOverlay, closeOverlay, notify } from "herdr";
 import { herdr, away, hide, show } from "./backstage.js";
+
+// A move that didn't happen is said, not swallowed: the person sees nothing change otherwise.
+const failed = (title, e) => notify({ title, body: String(e?.message ?? e), level: "error", timeout: 15000 });
 
 
 function icon(p, size, color) {
@@ -138,14 +141,24 @@ export default class Pane extends View {
       .child(svg("mods/chat-pane/close.svg").size(14));
   }
 
+  // The dialog closes itself only once its move is done: Herdr cancels a
+  // closing copy's pending work, so a hide or show started after closeOverlay
+  // never finished.
   answer(what, cx) {
+    if (this.busy) return;
     const { overlay, ask, term, chat } = props();
-    closeOverlay(overlay);
+    const done = () => closeOverlay(overlay);
+    const work = (label, f) => {
+      this.busy = label;
+      cx.notify();
+      cx.spawn(async () => { await f(); done(); });
+    };
     const chatPane = panes().find((x) => x.pane === chat);
     const agentTerm = () => terminals().find((x) => x.address === (term ?? panes().find((x) => x.pane === ask)?.terminal));
     // Its terminal hid away from the chat (Hide terminal): it's in a tab of its own.
     const hidden = away(agentTerm());
     if (what === "end") {
+      done();
       // Ends the agent and closes its chat with it: the whole tab when that's all it holds.
       if (hidden) { run("terminal.kill", { terminal: agentTerm().address }); run("pane.close", { pane: chat }); return; }
       const tab = panes().find((x) => x.pane === ask)?.tab;
@@ -153,12 +166,18 @@ export default class Pane extends View {
       else { run("pane.close", { pane: ask }); run("pane.close", { pane: chat }); }
     }
     // Only the agent's terminal goes; other panes beside the chat stay.
-    else if (what === "hide" && chatPane) cx.spawn(async () => { try { await hide(agentTerm(), chatPane.tab); } catch {} });
+    else if (what === "hide" && chatPane) work("Hiding the terminal…", async () => {
+      try { await hide(agentTerm(), chatPane.tab); } catch (e) { failed("Couldn't hide the terminal", e); }
+    });
     // The chat goes and its terminal takes its place, back from its own tab if it hid.
     else if (what === "keep") {
-      if (!hidden) return run("pane.close", { pane: chat });
-      cx.spawn(async () => { try { await show(agentTerm()); } catch {} run("pane.close", { pane: chat }); });
+      if (!hidden) { done(); return run("pane.close", { pane: chat }); }
+      work("Bringing the terminal back…", async () => {
+        try { await show(agentTerm()); } catch (e) { failed("Couldn't bring the terminal back", e); }
+        run("pane.close", { pane: chat });
+      });
     }
+    else done();
   }
 
   question(t) {
@@ -182,7 +201,7 @@ export default class Pane extends View {
         .child(p.from === "chat"
           ? "Closing this chat ends the agent and closes its terminal. Keep running closes only the chat."
           : "Closing this terminal ends the agent and closes its chat. Hide terminal keeps it running."))
-      .child(h_flex().justify_end().gap(8).text_size(12)
+      .child(this.busy ? h_flex().justify_end().text_size(12).text_color(t.muted).child(this.busy) : h_flex().justify_end().gap(8).text_size(12)
         .child(button("cancel", "Cancel", false, "cancel"))
         .child(p.from === "chat" ? button("keep", "Keep running", false, "keep") : button("hide", "Hide terminal", false, "hide"))
         .child(button("end", "End agent", true, "end")));

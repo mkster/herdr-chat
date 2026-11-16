@@ -6,10 +6,11 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea, Popover, InputState, Input } from "gpui-base";
 import {
-  exec, hc, run, props, terminals, panes, spaces, theme, settings, appHome, home,
+  hc, run, props, terminals, panes, spaces, theme, settings, appHome, home,
   watchFolder, nextCommand, pickFolder, shared, setShared, closeOverlay, machines, openOverlay, notify,
   window as appWindow,
 } from "herdr";
+import { exec, onWindows } from "./winexec.js";
 import * as fs from "fs/promises";
 import { Buffer } from "buffer";
 import { createHash } from "crypto";
@@ -20,7 +21,7 @@ import { emojify, PICKER, emojiMatches } from "./emoji.js";
 import { parsePrompt, choose, menuAtBottom } from "./prompt.js";
 import { loadCommands, matchCommands } from "./commands.js";
 import { askSide, sessionOf, control, listSessions, askCodexSide, codexCalls } from "./sdk.js";
-import { copyText, pasteImage, openFile, pickFiles, imageSize } from "./platform.js";
+import { copyText, pasteImage, openFile, pickFiles, imageSize, writeBase64 } from "./platform.js";
 import { live } from "./stream.js";
 import { herdr, chatTab, away, hide, show } from "./backstage.js";
 
@@ -28,7 +29,6 @@ const ASK_FIRST = "Answer the question above first.";
 
 const CACHE = "data/chat";
 const PAGE = 60;
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic)$/i;
 const AGENTS = { claude: "Claude Code", codex: "Codex" };
 
@@ -402,7 +402,7 @@ export default class Chat extends View {
     const out = r.out.slice(-LINES);
     return v_flex().w_full().gap(6).px(12).py(9).rounded(10).border_1().border_color(t.border).bg(t.surface)
       .child(h_flex().h(20).gap(8).items_center()
-        .child(div().flex_none().text_color(t.working).frames(SPINNER, 90))
+        .child(this.spinner(t))
         .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_medium().when(Boolean(mono), (d) => d.font_family(mono)).child(r.title))
         .when(Boolean(r.time), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(r.time))))
       .child(v_flex().h(LINES * LH + 12).px(10).py(6).rounded(6).bg(t.background).overflow_hidden().justify_end()
@@ -979,7 +979,7 @@ export default class Chat extends View {
     const bubble = (x, i) => v_flex().gap(8)
       .child(h_flex().w_full().justify_end().child(div().max_w(w - 70).px(12).py(8).rounded(14).bg(t.raised).text_size(12.5).child(x.q)))
       .child(x.pending
-        ? h_flex().gap(8).items_center().text_size(12).text_color(t.muted).child(div().text_color(t.working).frames(SPINNER, 90)).child("Thinking…")
+        ? h_flex().gap(8).items_center().text_size(12).text_color(t.muted).child(this.spinner(t)).child("Thinking…")
         : x.error ? div().text_size(12).text_color(t.blocked).child(x.error)
         : div().text_size(12.5).child(this.markdown(`side-${i}`, x.a)));
     const content = v_flex().id("side-content").absolute().left(0).right(0).bottom(-S.off).px(14).py(14).gap(18)
@@ -1135,6 +1135,10 @@ export default class Chat extends View {
     this.keepAway();
     const kind = agentKind(term);
     this.loadCmds(term, kind, cx);
+    // The mode can change without the log saying so yet (an answer to one of
+    // Claude's questions turns on auto mode): read the footer again whenever
+    // the agent's status changes, not only when the mode menu opens.
+    if (term?.status !== this.lastStatus) { this.lastStatus = term?.status; this.readMode(cx); }
     // A loop that went quiet has stopped (a reload of the mod ends its tasks
     // but keeps the chat): start it again rather than freeze the chat.
     const quiet = (since, ms) => Date.now() - (since ?? 0) > ms;
@@ -1366,7 +1370,7 @@ export default class Chat extends View {
       try {
         const ext = img.ext ?? (img.path.split(".").pop() || "png").toLowerCase();
         const rel = `${CACHE}/${img.ref}.${ext}`, abs = `${appHome()}/${rel}`;
-        if (img.data) await fs.writeFile(abs, Buffer.from(img.data, "base64"));
+        if (img.data) await writeBase64(abs, img.data);
         else if ((await exec("cp", [img.path, abs])).code !== 0) throw new Error("copy failed");
         const { w, h } = (await imageSize(abs)) ?? { w: 320, h: 240 };
         this.images[img.ref] = { rel, abs, w, h };
@@ -1581,7 +1585,7 @@ export default class Chat extends View {
     this.input.focus();
     cx.spawn(async (cx) => {
       for (const src of paths) {
-        const name = src.split("/").pop();
+        const name = src.split(onWindows() ? /[\\/]/ : "/").pop();
         const path = `${appHome()}/${CACHE}/files/${Date.now()}-${name}`;
         await fs.mkdir(`${appHome()}/${CACHE}/files`, { recursive: true }).catch(() => {});
         if ((await exec("cp", ["-R", src, path])).code !== 0) { this.error = `Couldn't attach ${name}`; continue; }
@@ -1594,12 +1598,21 @@ export default class Chat extends View {
   }
 
   // A pasted screenshot: save the clipboard image and attach it.
+  // Reading the clipboard can take a second or two (PowerShell on Windows), so
+  // a placeholder shows in the attachment row meanwhile.
   pasteImage(cx) {
+    this.pasting = (this.pasting ?? 0) + 1;
+    cx.notify();
     cx.spawn(async (cx) => {
       const path = `${appHome()}/${CACHE}/paste-${Date.now()}.png`;
-      const got = await pasteImage(path);
-      if (got === "missing") notify({ title: "Can't paste images here", body: "Install wl-clipboard (or xclip), or drop the image on the chat", level: "warning", timeout: 5000 });
-      else if (got) this.addFiles([path], cx);
+      try {
+        const got = await pasteImage(path);
+        if (got === "missing") notify({ title: "Can't paste images here", body: "Install wl-clipboard (or xclip), or drop the image on the chat", level: "warning", timeout: 5000 });
+        else if (got) this.addFiles([path], cx);
+      } finally {
+        this.pasting--;
+        cx.notify();
+      }
     });
   }
 
@@ -1619,6 +1632,19 @@ export default class Chat extends View {
     return div().id(id).flex_none().px(10).py(5).rounded(8).cursor_pointer().text_size(12)
       .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground)
       .hover((s) => s.opacity(0.85)).on_click(action).child(text);
+  }
+
+  // Herdr's own ring spinner, turned natively: braille spinner characters are
+  // missing from many UI fonts and come out small and low.
+  spinner(t) {
+    return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
+  }
+
+  // The current choice's mark in a menu row: an icon, not a "✓" character,
+  // which fonts without it draw small and off-center.
+  tick(on, w, t) {
+    return div().w(w).flex_none().flex().items_center().text_color(t.accent)
+      .when(on, (el) => el.child(svg("mods/chat/icons/check.svg").size(12)));
   }
 
   img(ref, t, maxW = 360, maxH = 260) {
@@ -1698,7 +1724,7 @@ export default class Chat extends View {
       .child(div().h_full().rounded(3).bg(color).w(`${Math.max(0, Math.min(100, pct))}%`));
     const row = (k, v) => h_flex().gap(12).text_size(12.5).child(div().w(110).flex_none().text_color(t.muted).child(k)).child(div().flex_1().min_w(0).child(String(v)));
     if (e.loading) return box(e.title ?? (e.card === "usage" ? "Usage" : e.card === "status" ? "Status" : "Context"))
-      .child(h_flex().gap(8).text_size(12).text_color(t.muted).child(div().text_color(t.working).frames(SPINNER, 90)).child("Asking Claude…"));
+      .child(h_flex().gap(8).text_size(12).text_color(t.muted).child(this.spinner(t)).child("Asking Claude…"));
     if (e.error) return box(e.title ?? "Usage").child(div().text_size(12).text_color(t.blocked).child(e.error));
     if (e.card === "context") {
       const COLORS = { "System prompt": t.dim, "System tools": t.muted, "MCP tools": t.ansi2, "MCP server instructions": t.ansi2, "Memory files": t.ansi3,
@@ -1802,9 +1828,9 @@ export default class Chat extends View {
       .child(h_flex().id(`tg-${e.key}`).gap(6).items_center().cursor_pointer().text_size(12).text_color(t.dim)
         .hover((s) => s.text_color(t.muted))
         .on_click((_ev, cx) => { open ? this.open.delete(e.key) : this.open.add(e.key); cx.notify(); })
-        .child(div().w(10).flex_none().child(open ? "▾" : "▸"))
+        .child(svg(`mods/chat/icons/${open ? "chevron-down" : "chevron"}.svg`).size(12).flex_none())
         .child(div().flex_1().min_w(0).truncate().child(label))
-        .when(running, (el) => el.child(div().flex_none().text_color(t.working).frames(SPINNER, 90)))
+        .when(running, (el) => el.child(this.spinner(t)))
         .when(failed, (el) => el.child(div().flex_none().text_color(t.blocked).child("error"))))
       .when(!open && thumbs.length > 0, (el) => el.child(h_flex().pl(16).gap(6).children(thumbs.map((i) => this.img(i.ref, t, 160, 110)))))
       .when(open, (el) => el.children(e.items.map((i, n) => this.tool(e.key, n, i, t))));
@@ -1921,7 +1947,7 @@ export default class Chat extends View {
     const busy = kind === "codex" && term?.status === "working";
     const item = (m) => h_flex().id(`pm-${m.id}`).px(10).py(5).gap(8).rounded(6).text_size(12.5).text_color(busy ? t.dim : t.foreground)
       .when(!busy, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.showModes = false; this.setMode(m, cx); cx.notify(); }))
-      .child(div().w(12).flex_none().text_color(t.accent).child(m.id === mode ? "✓" : ""))
+      .child(this.tick(m.id === mode, 12, t))
       .child(v_flex().flex_1().min_w(0).child(div().child(m.label)).child(div().text_size(11).text_color(t.dim).child(m.desc)));
     const menu = v_flex().w(300).p(4).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
       .child(div().px(10).pt(8).pb(4).text_size(11).font_semibold().text_color(t.dim).child("Permissions"))
@@ -1933,7 +1959,7 @@ export default class Chat extends View {
         .when(Boolean(this.showModes), (el) => el.bg(t.hover))
         .text_color(risky ? t.blocked : this.showModes ? t.foreground : t.muted)
         .hover((s) => s.bg(t.hover).text_color(risky ? t.blocked : t.foreground))
-        .child(div().child(now?.label ?? "Permissions")).child(div().text_color(t.dim).text_size(10).child("⌄")))
+        .child(div().child(now?.label ?? "Permissions")).child(svg("mods/chat/icons/chevron-down.svg").size(12).flex_none().text_color(t.dim)))
       .content(menu);
   }
 
@@ -1946,13 +1972,13 @@ export default class Chat extends View {
     const label = h_flex().gap(5).items_center()
       .child(div().text_color(t.foreground).child(this.switching ? "Switching…" : modelName(cat?.models, model)))
       .when(Boolean(effort) && !this.switching, (el) => el.child(div().text_color(t.dim).child(effort)))
-      .child(div().text_color(t.dim).text_size(10).child("⌄"));
+      .child(svg("mods/chat/icons/chevron-down.svg").size(12).flex_none().text_color(t.dim));
     const efforts = cat?.models.find((m) => m.id === model)?.efforts ?? [];
     const pick = (m, e) => (_ev, cx) => { this.showModels = false; this.applyModel(m, e, cx); };
     const heading = (text) => div().px(10).pt(8).pb(4).text_size(11).font_semibold().text_color(t.dim).child(text);
     const item = (id, text, selected, action) => h_flex().id(id).px(10).py(5).gap(8).rounded(6).cursor_pointer().text_size(12.5)
       .text_color(t.foreground).hover((s) => s.bg(t.hover)).on_click(action)
-      .child(div().w(12).flex_none().text_color(t.accent).child(selected ? "✓" : ""))
+      .child(this.tick(selected, 12, t))
       .child(div().flex_1().child(text));
     const menu = v_flex().w(240).p(4).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
       .child(heading("Model"))
@@ -2042,6 +2068,15 @@ export default class Chat extends View {
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().font_semibold().text_size(12.5).text_color(t.blocked).child(title))
         .child(this.button("go-term2", "Show terminal", (_e, cx) => this.showTerminal(cx), t)))
+      // Several questions at once: which ones are answered. One alone needs no row,
+      // and Claude's "Submit" tab is the Enter that ends the form.
+      .when((q?.tabs?.filter((x) => x.label !== "Submit").length ?? 0) > 1, (el) => el.child(h_flex().gap(6).flex_wrap().items_center()
+        .child(div().text_size(11.5).text_color(t.dim).child("Questions:"))
+        .children(q.tabs.filter((x) => x.label !== "Submit").map((tab) =>
+        h_flex().gap(4).items_center().px(8).py(2).rounded_full().border_1().border_color(t.border).text_size(11.5)
+          .text_color(tab.done ? t.muted : t.foreground)
+          .when(tab.done, (p) => p.child(svg("mods/chat/icons/check.svg").size(11).flex_none().text_color(t.accent)))
+          .child(tab.label)))))
       .when(Boolean(q?.question), (el) => el.child(div().text_size(12.5).child(this.markdown("question", q.question))))
       .when(Boolean(q), (el) => el.child(v_flex().gap(6).children(q.options.map((o, n) =>
         h_flex().id(`choice-${n}`).px(12).py(8).gap(10).rounded(8).cursor_pointer().border_1()
@@ -2073,12 +2108,15 @@ export default class Chat extends View {
       .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(action).child(text);
     const card = v_flex().w_full().max_w(900).rounded(18).border_1().border_color(this.inputFocused ? t.input : t.border)
       .bg(t.background).shadow_sm()
-      .when(this.attach.length > 0, (el) => el.child(h_flex().px(12).pt(12).gap(8).flex_wrap().children(this.attach.map((a, n) =>
+      .when(this.attach.length > 0 || this.pasting > 0, (el) => el.child(h_flex().px(12).pt(12).gap(8).flex_wrap().children(this.attach.map((a, n) =>
         div().relative()
           .child(a.image ? this.img(a.image.ref, t, 96, 72) : div().px(10).py(8).rounded(8).bg(t.raised).text_size(11.5).child(a.name))
           .child(div().id(`rm-${n}`).absolute().top(-6).right(-6).size(18).rounded_full().flex().items_center().justify_center()
             .bg(t.foreground).text_color(t.background).text_size(11).cursor_pointer().hover((s) => s.opacity(0.8))
-            .on_click((_e, cx) => { this.attach.splice(n, 1); cx.notify(); }).child("×"))))))
+            .on_click((_e, cx) => { this.attach.splice(n, 1); cx.notify(); }).child("×"))))
+        .when(this.pasting > 0, (row) => row.child(h_flex().h(72).px(12).gap(6).items_center().rounded(8).bg(t.raised)
+          .text_size(11.5).text_color(t.muted)
+          .child(this.spinner(t)).child("Pasting image…")))))
       .when(Boolean(this.showEmoji), (el) => el.child(h_flex().px(10).pt(10).gap(2).flex_wrap().children(PICKER.map((e, n) =>
         div().id(`emoji-${n}`).size(30).rounded(6).flex().items_center().justify_center().text_size(17).cursor_pointer()
           .hover((s) => s.bg(t.hover)).on_click((_ev, cx) => { this.input.replace(e); this.input.focus(); cx.notify(); }).child(e)))))
@@ -2112,7 +2150,7 @@ export default class Chat extends View {
           .child(stop ? "■" : "↑")));
     return v_flex().flex_none().bg(t.background).px(16).pb(14).gap(8)
       .when(working, (el) => el.child(h_flex().w_full().justify_center().child(h_flex().w_full().max_w(900).px(6).gap(8).items_center().text_size(12).text_color(t.muted)
-        .child(div().flex_none().text_color(t.working).frames(SPINNER, 90))
+        .child(this.spinner(t))
         .child(div().flex_1().min_w(0).truncate().child(term.report?.msg || "Working…")))))
       .when((status === "blocked" || Boolean(this.idleAsk)) && Boolean(this.t), (el) => el.child(h_flex().w_full().justify_center()
         .child(div().w_full().max_w(900).child(this.promptBox("The agent is asking:", t)))))
@@ -2150,7 +2188,7 @@ export default class Chat extends View {
         const current = this.current().model;
         const here = r.m.id !== "default" && (r.m.id === current || r.m.resolved === current);
         return shell(`menu-m-${r.m.id}`, i).on_click((_e, cx) => this.choose(r, cx))
-          .child(div().w(14).flex_none().text_color(t.accent).child(here ? "✓" : ""))
+          .child(this.tick(here, 14, t))
           .child(div().flex_none().text_size(13).child(r.m.name))
           .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(r.m.desc ?? ""));
       }
@@ -2160,7 +2198,7 @@ export default class Chat extends View {
       if (r.type === "mode") {
         const now = this.current().mode;
         return shell(`menu-p-${r.mode.id}`, i).on_click((_e, cx) => this.choose(r, cx))
-          .child(div().w(14).flex_none().text_color(t.accent).child(now === r.mode.id ? "✓" : ""))
+          .child(this.tick(now === r.mode.id, 14, t))
           .child(div().flex_none().text_size(13).child(r.mode.label))
           .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(r.mode.desc));
       }
