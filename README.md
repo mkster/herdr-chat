@@ -62,6 +62,10 @@ Then merge `keys.json` into `~/.config/herdr-app/keys.json`. Its `secondary-n` i
 - On Linux:
   - `kdialog` or `zenity` for the **+** file picker.
   - `wl-clipboard` or `xclip` (or KDE's Klipper) for `/copy` and pasting images.
+- On Windows:
+  - [Git for Windows](https://git-scm.com): the chat runs its helper scripts with Git's `sh` and tools (found through `git --exec-path`; nothing to add to PATH).
+  - Python 3 from python.org (the `py` launcher) or a `python` on PATH; the Microsoft Store's `python3` placeholder is not used.
+  - The file picker, clipboard and opening files use PowerShell, which every Windows has.
 
 To keep your own layout instead, point its pane header at `chat-pane` and its tab bar at `chat-tabs`. Optionally, point its spaces sidebar at `spaces-chat` and its agents list at `agents-chat`. See [RECIPE.md](RECIPE.md) for how it all works.
 
